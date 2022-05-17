@@ -94,38 +94,56 @@ function determine_rainy_season_start($raindata, $n_history_vals) {
 
 ini_set("allow_url_fopen", 1);
 $api_key = "5b1618c38d84876d161ee8776e011fc7";
-
-// $dat = get_historical_data($lat, $long, $api_key);
-// file_put_contents('historical_data.tmp', json_encode($dat));
-
-// $prev_raindat = file_get_contents('historical_data.tmp');
-// $prev_raindat = json_decode($prev_raindat);
-// determine_rainy_season_start($dat, 5);
-//
-// $future_raindat = get_future_raindata($lat, $long, $api_key);
-// $res = determine_rainy_season_start(array_merge($prev_raindat, $future_raindat), 35);
 $conn = new mysqli("localhost", "debian-sys-maint", "aQxrH9qK0JAgaTHs");
 $sql = "SELECT * FROM id18864578_data.predictions";
 $result_query = $conn->query($sql);
 
-$DB_PERMANENT_RAINSEASON_STARTED = -2;
-$DB_PREDICTION_RAINSEASON_STARTED = -1;
+// prediction, the rainseason has not yet started in the past and will not start in the coming 18 days
+$DB_PRED_HAS_NOT_WILL_NOT_START = -3;
+// prediction, the rainseason has started in the past
+$DB_PRED_HAS_STARTED = -2;
+// fact, the rainseason has started in the past
+$DB_FACT_HAS_STARTED = -1;
 
-$FUNC_RAINSEASON_NOT_PREDICTED = -2;
-$FUNC_RAINSEASON_STARTED = -1;
+$FUNC_DID_NOT_START = -2;
+$FUNC_PRED_WILL_NOT_HAS_NOT_STARTED = -2;
+$FUNC_PRED_DID_START = -1;
 
 while ($row = $result_query->fetch_assoc()) {
+    $region = $row['region_name'];
+    echo "REGION : $region <br>";
+
+    // In the first two months, the rainy season can not occur. If the current
+    // day lies within this, we therefore reset earlier made predictions.
     if (first_two_months()) {
-        $region = $row['region_name'];
-        $conn->query("UPDATE id18864578_data.predictions SET rainy_season_prediction = -1 WHERE region_name = " . '"' . $region . '"');
-    // If the value is -2, the rain season has already started, based on non-predictional data.
-    // The estimate then doesn't need to be adjusted anymore.
-    } else if ($row["rainy_season_prediction"] != $DB_PERMANENT_RAINSEASON_STARTED) {
+        $conn->query("UPDATE id18864578_data.predictions SET rainy_season_prediction = $DB_PRED_HAS_NOT_WILL_NOT_START WHERE region_name = " . '"' . $region . '"');
+    // If the rainy season has already started in the past, no need for further preditions.
+    } else if ($row["rainy_season_prediction"] != $DB_FACT_HAS_STARTED) {
         $historical_data = get_historical_data($row['latitude'], $row["longitude"], $api_key);
-        $ret = determine_rainy_season_start($historical_data, 5);
-        if ($ret != $FUNC_RAINSEASON_NOT_PREDICTED) {
-            $conn->query("UPDATE id18864578_data.predictions SET rainy_season_prediction = -2 WHERE region_name = " . '"' . $region . '"');
+        $future_data = get_future_raindata($row['latitude'], $row["longitude"], $api_key);
+
+        $ret_hist = determine_rainy_season_start($historical_data, 5);
+        $ret_hist_future = determine_rainy_season_start(array_merge($historical_data, $future_data), 35);
+
+        $place_in_db = "";
+
+        // Based on historical data (with respect to the current date) the rainy
+        // season has not started in the past.
+        if ($ret_hist == $FUNC_DID_NOT_START) {
+            if ($ret_hist_future == $FUNC_PRED_WILL_NOT_HAS_NOT_STARTED) {
+                $place_in_db = $DB_PRED_HAS_NOT_WILL_NOT_START;
+            } else if ($ret_hist_future == $FUNC_PRED_DID_START) {
+                $place_in_db = $DB_PRED_HAS_STARTED;
+            // It is predicted that the rainy season will start in >= 0 days.
+            } else if ($ret_hist_future >= 0) {
+                $place_in_db = $ret_hist_future;
+            }
+        // The rainy season has started in the past.
+        } else if ($ret_hist >= 0) {
+            $place_in_db = $DB_FACT_HAS_STARTED;
         }
+
+        $conn->query("UPDATE id18864578_data.predictions SET rainy_season_prediction = $place_in_db WHERE region_name = " . '"' . $region . '"');
     }
 }
 ?>
