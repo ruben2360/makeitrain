@@ -6,8 +6,8 @@ function get_previous_day($lat, $long, $start, $api_key) {
     return $obj;
 }
 
-function get_climatic_forecast($lat, $long, $api_key) {
-    $url = "https://pro.openweathermap.org/data/2.5/forecast/climate?lat=$lat&lon=$long&appid=$api_key";
+function get_climatic_forecast($lat, $long, $api_key, $cnt) {
+    $url = "https://pro.openweathermap.org/data/2.5/forecast/climate?lat=$lat&lon=$long&appid=$api_key&cnt=$cnt";
     $json = file_get_contents($url);
     $obj = json_decode($json, $assoc = true);
     return $obj;
@@ -44,7 +44,7 @@ function first_two_months() {
 
 function get_future_raindata($lat, $long, $api_key) {
     $rain_per_day = array();
-    $future_raindata = get_climatic_forecast($lat, $long, $api_key)["list"];
+    $future_raindata = get_climatic_forecast($lat, $long, $api_key, 30)["list"];
 
     foreach ($future_raindata as $future_day) {
         if (array_key_exists("rain", $future_day)) {
@@ -55,6 +55,49 @@ function get_future_raindata($lat, $long, $api_key) {
     }
 
     return $rain_per_day;
+}
+
+function get_future_rain_classifications($lat, $long, $api_key) {
+    $classification_per_day = array();
+    $future_data = get_climatic_forecast($lat, $long, $api_key, 3)["list"];
+
+    foreach ($future_data as $future_day) {
+        $weather_code = intval($future_day["weather"][0]["id"]);
+        $rain_classification = "no_rain";
+
+        switch ($weather_code) {
+            case 500: // light rain
+                $rain_classification = "light";
+                break;
+            case 501: // moderate rain
+                $rain_classification = "medium";
+                break;
+            case 502: // heavy rain
+                $rain_classification = "heavy";
+                break;
+            case 503: // very heavy rain
+                $rain_classification = "very_heavy";
+                break;
+            case 504: // extreme rain
+                $rain_classification = "extreme";
+                break;
+            case 200: // thunderstorm + light rain
+                $rain_classification = "light";
+                break;
+            case 201: // thunderstorm + rain
+                $rain_classification = "medium";
+                break;
+            case 202: // thunderstorm + heavy rain
+                $rain_classification = "heavy";
+                break;
+            default:
+                break;
+        }
+
+        array_push($classification_per_day, $rain_classification);
+    }
+
+    return $classification_per_day;
 }
 
 function does_rain_season_start($history_raindata, $next_raindata) {
@@ -68,10 +111,6 @@ function does_rain_season_start($history_raindata, $next_raindata) {
         }
     }
 
-    echo "In total $history_sum mm of rain in the past.<br>";
-    echo "At most $history_biggest mm of rain in the past.<br>";
-    echo "$no_wet_days days of rain in the future.<br>";
-
     if ($history_sum >= 40.0 && $history_biggest >= 16.0 && $no_wet_days >= 12) {
         return true;
     } else {
@@ -83,7 +122,7 @@ function determine_rainy_season_start($raindata, $n_history_vals) {
     for ($i = 5; $i < count($raindata) - 11; $i++) {
         $cur_window = array_slice($raindata, $i - 5);
         $cur_day = $i - $n_history_vals - 1;
-        echo "Day $cur_day <br>";
+
         if (does_rain_season_start(array_slice($cur_window, 0, 5), array_slice($cur_window, 5)) == true) {
             return max($i - $n_history_vals - 1, -1);
         }
@@ -93,9 +132,9 @@ function determine_rainy_season_start($raindata, $n_history_vals) {
 }
 
 ini_set("allow_url_fopen", 1);
-$api_key = "5b1618c38d84876d161ee8776e011fc7";
-$conn = new mysqli("localhost", "debian-sys-maint", "aQxrH9qK0JAgaTHs");
-$sql = "SELECT * FROM id18864578_data.predictions";
+include("config.php");
+$conn = new mysqli($mysql_url, $mysql_username, $mysql_passwd);
+$sql = "SELECT * FROM u230489196_makeitrain.predictions";
 $result_query = $conn->query($sql);
 
 // prediction, the rainseason has not yet started in the past and will not start in the coming 18 days
@@ -110,13 +149,20 @@ $FUNC_PRED_WILL_NOT_HAS_NOT_STARTED = -2;
 $FUNC_PRED_DID_START = -1;
 
 while ($row = $result_query->fetch_assoc()) {
-    $region = $row['region_name'];
-    echo "REGION : $region <br>";
+    $region = $row["region_name"];
+
+    // Update three-day rain predictions
+    $future_classifications = get_future_rain_classifications($row["latitude"], $row["longitude"], $api_key);
+    $conn->query("UPDATE u230489196_makeitrain.predictions SET rain_tomorrow = '". $future_classifications[0] . "' WHERE region_name = " . '"' . $region . '"');
+    $conn->query("UPDATE u230489196_makeitrain.predictions SET rain_tdat = '". $future_classifications[1] . "' WHERE region_name = " . '"' . $region . '"');
+    $conn->query("UPDATE u230489196_makeitrain.predictions SET rain_tdat_tdat = '". $future_classifications[2] . "' WHERE region_name = " . '"' . $region . '"');
+
+    // Update rainy season prediction
 
     // In the first two months, the rainy season can not occur. If the current
     // day lies within this, we therefore reset earlier made predictions.
     if (first_two_months()) {
-        $conn->query("UPDATE id18864578_data.predictions SET rainy_season_prediction = $DB_PRED_HAS_NOT_WILL_NOT_START WHERE region_name = " . '"' . $region . '"');
+        $conn->query("UPDATE u230489196_makeitrain.predictions SET rainy_season_prediction = $DB_PRED_HAS_NOT_WILL_NOT_START WHERE region_name = " . '"' . $region . '"');
     // If the rainy season has already started in the past, no need for further preditions.
     } else if ($row["rainy_season_prediction"] != $DB_FACT_HAS_STARTED) {
         $historical_data = get_historical_data($row['latitude'], $row["longitude"], $api_key);
@@ -143,7 +189,7 @@ while ($row = $result_query->fetch_assoc()) {
             $place_in_db = $DB_FACT_HAS_STARTED;
         }
 
-        $conn->query("UPDATE id18864578_data.predictions SET rainy_season_prediction = $place_in_db WHERE region_name = " . '"' . $region . '"');
+        $conn->query("UPDATE u230489196_makeitrain.predictions SET rainy_season_prediction = $place_in_db WHERE region_name = " . '"' . $region . '"');
     }
 }
 ?>
